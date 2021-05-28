@@ -325,9 +325,9 @@
 			let height = Math.max(PSM[lSelect.value].height(), PSM[rSelect.value].height());
 			container.style.setProperty("grid-template-columns", `${100 * lWidth / width}% ${100 * rWidth / width}%`);
 			lDraw.style.setProperty("grid-template-columns", `repeat(${lWidth}, ${100/lWidth}%)`);
-			lDraw.style.setProperty("grid-template-rows", `repeat(${height}, ${100/height}%)`);
+			lDraw.style.setProperty("grid-template-rows", `repeat(${height}, minmax(1em, auto))`);
 			rDraw.style.setProperty("grid-template-columns", `repeat(${rWidth}, ${100/rWidth}%)`);
-			rDraw.style.setProperty("grid-template-rows", `repeat(${height}, ${100/height}%)`);
+			rDraw.style.setProperty("grid-template-rows", `repeat(${height}, minmax(1em, auto))`);
 		}
 
 		/**
@@ -336,10 +336,14 @@
 		 * @param {number} width
 		 * @param {number} height
 		 * @param {function(number, number): T} propertyGetter
-		 * @param {function(T, number): ?Element} nodeCreator
+		 * @param {function(T): ?Element} nodeCreator
 		 * @returns {Element[]}
 		 */
 		function genRows(width, height, propertyGetter, nodeCreator) {
+			/** @type {{ val: T, x1: number, x2: number, y1: number }[]} */
+			let lastRow = [];
+			/** @type {{ val: T, x1: number, x2: number, y1: number }[]} */
+			let curRow = [];
 			/** @type {T} */
 			let last;
 			let lastX = 0;
@@ -348,12 +352,57 @@
 			let y = 0;
 			function flush() {
 				if (last === undefined) { return; }
-				let node = nodeCreator(last);
+				curRow.push({ val: last, x1: lastX + 1, x2: x + 1, y1: y + 1 });
+				last = undefined;
+			}
+			/** @param {{ val: T, x1: number, x2: number, y1: number }} item */
+			function add(item, y2) {
+				let node = nodeCreator(item.val);
 				if (!node) { return; }
-				node.style.setProperty("grid-column-start", lastX + 1);
-				node.style.setProperty("grid-column-end", x + 1);
-				node.style.setProperty("grid-row", y + 1);
+				node.style.setProperty("grid-column-start", item.x1);
+				node.style.setProperty("grid-column-end", item.x2);
+				node.style.setProperty("grid-row-start", item.y1);
+				node.style.setProperty("grid-row-end", y2);
 				out.push(node);
+			}
+			/** Coalesces lines in curRow with identical lines in lastRow */
+			function flushRow() {
+				flush();
+				let lastIdx = 0;
+				let curIdx = 0;
+				let newLast = [];
+				function pushCur() {
+					newLast.push(curRow[curIdx]);
+					curIdx++;
+				}
+				function pushLast() {
+					add(lastRow[lastIdx], y + 1);
+					lastIdx++;
+				}
+				while (lastIdx < lastRow.length || curIdx < curRow.length) {
+					let lastVal = lastRow[lastIdx];
+					let curVal = curRow[curIdx];
+					if (lastIdx >= lastRow.length) {
+						pushCur();
+					} else if (curIdx >= curRow.length) {
+						pushLast();
+					} else if (curVal.x1 < lastVal.x1) { // cur val comes before last val
+						pushCur();
+					} else if (lastVal.x1 < curVal.x1) { // last val comes before cur val
+						pushLast();
+					} else if (lastVal.x2 !== curVal.x2 || lastVal.val !== curVal.val) {
+						// Start at same position, but cannot coalesce
+						pushCur();
+						pushLast();
+					} else {
+						// Able to coalesce
+						newLast.push(lastRow[lastIdx]);
+						lastIdx++;
+						curIdx++;
+					}
+				}
+				curRow = [];
+				lastRow = newLast;
 			}
 			for (y = 0; y < height; y++) {
 				for (x = 0; x < width; x++) {
@@ -364,9 +413,9 @@
 						lastX = x;
 					}
 				}
-				flush();
-				last = undefined;
+				flushRow();
 			}
+			flushRow(); // Flush with empty row will make nodes for all remaining items
 			return out;
 		}
 
