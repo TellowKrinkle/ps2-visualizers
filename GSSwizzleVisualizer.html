@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>GS Memory Swizzle Visualizer</title>
+	<style>
+		.label {
+			text-align: center;
+			font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace;
+		}
+		.pixel {
+			border: 1px solid black;
+		}
+	</style>
+</head>
+<body>
+	<div id="Container" style="display: grid; grid-template-columns: auto auto; grid-template-columns: auto auto;">
+		<select id="LeftSelect" onchange="refresh()">
+		</select>
+		<select id="RightSelect" onchange="refresh()">
+		</select>
+		<div id="LeftContainer" style="display: grid;">
+		</div>
+		<div id="RightContainer" style="display: grid;">
+		</div>
+	</div>
+
+	<script>
+		let lSelect = document.getElementById("LeftSelect");
+		let rSelect = document.getElementById("RightSelect");
+		let container = document.getElementById("Container");
+		let lDraw = document.getElementById("LeftContainer");
+		let rDraw = document.getElementById("RightContainer");
+
+		const BITS_PER_PAGE = 65536;
+		const BITS_PER_BLOCK = BITS_PER_PAGE / 32;
+		const BITS_PER_COLUMN = BITS_PER_BLOCK / 4;
+		let SHOWING_WHOLE_PAGE = false;
+
+		class PSMEntry {
+			/**
+			 * @param {[number, number]} blocksInPage
+			 * @param {[number, number]} pixelsInColumn
+			 * @param {string[]} partsInPixel
+			 * @param {number[]} bitsPerPart
+			 * @param {number[]} pageSwizzle
+			 * @param {number[]} blockSwizzle
+			 */
+			constructor(blocksInPage, pixelsInColumn, partsInPixel, bitsPerPart, pageSwizzle, blockSwizzle) {
+				this.bitsPerPixel = bitsPerPart.reduce((a, b) => a + b);
+				let blockBitWidth = pixelsInColumn[0] * this.bitsPerPixel;
+				this.bitsWide = blocksInPage[0] * blockBitWidth;
+				this.pixelsTall = blocksInPage[1] * pixelsInColumn[1] * 4;
+				this.blocksInPage = blocksInPage;
+				this.pixelsInColumn = pixelsInColumn;
+				this.partsInPixel = partsInPixel;
+				this.bitsPerPart = bitsPerPart;
+				this.swizzle = Array(BITS_PER_PAGE).fill(0);
+				/** @type {Bit[]} */
+				this.referenceBitArr = null;
+				for (let block = 0; block < 32; block++) {
+					let base = pageSwizzle[block] * BITS_PER_BLOCK;
+					let blockX = block % blocksInPage[0];
+					let blockY = block / blocksInPage[0] | 0;
+					blockX *= blockBitWidth;
+					blockY *= (pixelsInColumn[1] * 4);
+					for (let i = 0; i < BITS_PER_BLOCK; i++) {
+						let px = i / this.bitsPerPixel | 0;
+						let off = blockSwizzle[px % blockSwizzle.length];
+						let blockOff = (i / (BITS_PER_COLUMN) | 0) * BITS_PER_COLUMN;
+						let bitOff = off * this.bitsPerPixel + blockOff + i % this.bitsPerPixel;
+						let pos = base + bitOff;
+
+						let x = blockX + (i % blockBitWidth);
+						let y = blockY + (i / blockBitWidth | 0);
+						this.swizzle[y * this.bitsWide + x] = pos;
+					}
+				}
+			}
+			
+			width() {
+				if (SHOWING_WHOLE_PAGE) {
+					return this.bitsWide;
+				} else {
+					return this.pixelsInColumn[0] * this.bitsPerPixel;
+				}
+			}
+
+			height() {
+				if (SHOWING_WHOLE_PAGE) {
+					return this.blocksInPage[1] * this.pixelsInColumn[1] * 4;
+				} else {
+					return this.pixelsInColumn[1] * 4;
+				}
+			}
+
+			indexAt(x, y) {
+				let val = this.swizzle[y * this.bitsWide + x];
+				if (SHOWING_WHOLE_PAGE) {
+					return val;
+				} else {
+					return val % BITS_PER_BLOCK;
+				}
+			}
+
+			/** @param {Bit[]} bits */
+			writeTo(bits) {
+				let width = this.width() / this.bitsPerPixel | 0;
+				let height = this.height();
+				for (let i = 0; i < height; i++) {
+					for (let j = 0; j < width; j++) {
+						let no = i * width + j;
+						let x = j * this.bitsPerPixel;
+						for (let k = 0; k < this.partsInPixel.length; k++) {
+							for (let l = 0; l < this.bitsPerPart[k]; l++) {
+								bits[this.indexAt(x, i)].color = this.partsInPixel[k];
+								bits[this.indexAt(x, i)].number = no;
+								x++;
+							}
+						}
+					}
+				}
+			}
+
+			referenceBits() {
+				let size = this.width() * this.height();
+				if (!this.referenceBitArr || this.referenceBitArr.length !== size) {
+					this.referenceBitArr = Array(size).fill(0).map(_ => new Bit());
+					this.writeTo(this.referenceBitArr);
+				}
+				return this.referenceBitArr;
+			}
+		}
+
+		class Bit {
+			constructor() {
+				this.color = "";
+				this.number = 0;
+			}
+		}
+
+		const PageSwizzles = {
+			PSMCT32: [
+				 0,  1,  4,  5, 16, 17, 20, 21,
+				 2,  3,  6,  7, 18, 19, 22, 23,
+				 8,  9, 12, 13, 24, 25, 28, 29,
+				10, 11, 14, 15, 26, 27, 30, 31,
+			],
+			PSMZ32: [
+				24, 25, 28, 29,  8,  9, 12, 13,
+				26, 27, 30, 31, 10, 11, 14, 15,
+				16, 17, 20, 21,  0,  1,  4,  5,
+				18, 19, 22, 23,  2,  3,  6,  7,
+			],
+			PSMCT16: [
+				 0,  2,  8, 10,
+				 1,  3,  9, 11,
+				 4,  6, 12, 14,
+				 5,  7, 13, 15,
+				16, 18, 24, 26,
+				17, 19, 25, 27,
+				20, 22, 28, 30,
+				21, 23, 29, 31,
+			],
+			PSMCT16S: [
+				 0,  2, 16, 18,
+				 1,  3, 17, 19,
+				 8, 10, 24, 26,
+				 9, 11, 25, 27,
+				 4,  6, 20, 22,
+				 5,  7, 21, 23,
+				12, 14, 28, 30,
+				13, 15, 29, 31,
+			],
+			PSMZ16: [
+				24, 26, 16, 18,
+				25, 27, 17, 19,
+				28, 30, 20, 22,
+				29, 31, 21, 23,
+				 8, 10,  0,  2,
+				 9, 11,  1,  3,
+				12, 14,  4,  6,
+				13, 15,  5,  7,
+			],
+			PSMZ16S: [
+				24, 26,  8, 10,
+				25, 27,  9, 11,
+				16, 18,  0,  2,
+				17, 19,  1,  3,
+				28, 30, 12, 14,
+				29, 31, 13, 15,
+				20, 22,  4,  6,
+				21, 23,  5,  7,
+			]
+		};
+
+		const ColumnSwizzles = {
+			PSMCT32: [
+				 0,  1,  4,  5,  8,  9, 12, 13,
+				 2,  3,  6,  7, 10, 11, 14, 15
+			],
+			PSMCT16: [
+				 0,  2,  8, 10, 16, 18, 24, 26,  1,  3,  9, 11, 17, 19, 25, 27,
+				 4,  6, 12, 14, 20, 22, 28, 30,  5,  7, 13, 15, 21, 23, 29, 31
+			],
+			PSMT8: [
+				 0,  4, 16, 20, 32, 36, 48, 52,  2,  6, 18, 22, 34, 38, 50, 54,
+				 8, 12, 24, 28, 40, 44, 56, 60, 10, 14, 26, 30, 42, 46, 58, 62,
+				33, 37, 49, 53,  1,  5, 17, 21, 35, 39, 51, 55,  3,  7, 19, 23,
+				41, 45, 57, 61,  9, 13, 25, 29, 43, 47, 59, 63, 11, 15, 27, 31,
+				32, 36, 48, 52,  0,  4, 16, 20, 34, 38, 50, 54,  2,  6, 18, 22,
+				40, 44, 56, 60,  8, 12, 24, 28, 42, 46, 58, 62, 10, 14, 26, 30,
+				 1,  5, 17, 21, 33, 37, 49, 53,  3,  7, 19, 23, 35, 39, 51, 55,
+				 9, 13, 25, 29, 41, 45, 57, 61, 11, 15, 27, 31, 43, 47, 59, 63,
+			],
+			PSMT4: [
+				  0,   8,  32,  40,  64,  72,  96, 104,   2,  10,  34,  42,  66,  74,  98, 106,   4,  12,  36,  44,  68,  76, 100, 108,   6,  14,  38,  46,  70,  78, 102, 110,
+				 16,  24,  48,  56,  80,  88, 112, 120,  18,  26,  50,  58,  82,  90, 114, 122,  20,  28,  52,  60,  84,  92, 116, 124,  22,  30,  54,  62,  86,  94, 118, 126,
+				 65,  73,  97, 105,   1,   9,  33,  41,  67,  75,  99, 107,   3,  11,  35,  43,  69,  77, 101, 109,   5,  13,  37,  45,  71,  79, 103, 111,   7,  15,  39,  47,
+		 		 81,  89, 113, 121,  17,  25,  49,  57,  83,  91, 115, 123,  19,  27,  51,  59,  85,  93, 117, 125,  21,  29,  53,  61,  87,  95, 119, 127,  23,  31,  55,  63,
+		 		 64,  72,  96, 104,   0,   8,  32,  40,  66,  74,  98, 106,   2,  10,  34,  42,  68,  76, 100, 108,   4,  12,  36,  44,  70,  78, 102, 110,   6,  14,  38,  46,
+		 		 80,  88, 112, 120,  16,  24,  48,  56,  82,  90, 114, 122,  18,  26,  50,  58,  84,  92, 116, 124,  20,  28,  52,  60,  86,  94, 118, 126,  22,  30,  54,  62,
+		 		  1,   9,  33,  41,  65,  73,  97, 105,   3,  11,  35,  43,  67,  75,  99, 107,   5,  13,  37,  45,  69,  77, 101, 109,   7,  15,  39,  47,  71,  79, 103, 111,
+		 		 17,  25,  49,  57,  81,  89, 113, 121,  19,  27,  51,  59,  83,  91, 115, 123,  21,  29,  53,  61,  85,  93, 117, 125,  23,  31,  55,  63,  87,  95, 119, 127,
+			],
+		};
+
+		const r = "#FF9F9F";
+		const g = "#9FFF9F";
+		const b = "#9F9FFF";
+		const a = "#FFFFFF";
+		const d = "#BFBFBF";
+		const p = "#9F9F9F";
+
+		/** @type {Object.<string, PSMEntry>} */
+		const PSM = {
+			PSMCT32: new PSMEntry([8, 4], [8, 2], [r, g, b, a], [8, 8, 8, 8], PageSwizzles.PSMCT32, ColumnSwizzles.PSMCT32),
+			PSMCT24: new PSMEntry([8, 4], [8, 2], [r, g, b, ""], [8, 8, 8, 8], PageSwizzles.PSMCT32, ColumnSwizzles.PSMCT32),
+			PSMZ32: new PSMEntry([8, 4], [8, 2], [d], [32], PageSwizzles.PSMZ32, ColumnSwizzles.PSMCT32),
+			PSMZ24: new PSMEntry([8, 4], [8, 2], [d, ""], [24, 8], PageSwizzles.PSMZ32, ColumnSwizzles.PSMCT32),
+			PSMT8H: new PSMEntry([8, 4], [8, 2], ["", p], [24, 8], PageSwizzles.PSMCT32, ColumnSwizzles.PSMCT32),
+			PSMT4HH: new PSMEntry([8, 4], [8, 2], ["", p], [28, 4], PageSwizzles.PSMCT32, ColumnSwizzles.PSMCT32),
+			PSMT4HL: new PSMEntry([8, 4], [8, 2], ["", p, ""], [24, 4, 4], PageSwizzles.PSMCT32, ColumnSwizzles.PSMCT32),
+			PSMCT16: new PSMEntry([4, 8], [16, 2], [r, g, b, a], [5, 5, 5, 1], PageSwizzles.PSMCT16, ColumnSwizzles.PSMCT16),
+			PSMCT16S: new PSMEntry([4, 8], [16, 2], [r, g, b, a], [5, 5, 5, 1], PageSwizzles.PSMCT16S, ColumnSwizzles.PSMCT16),
+			PSMZ16: new PSMEntry([4, 8], [16, 2], [d], [16], PageSwizzles.PSMZ16, ColumnSwizzles.PSMCT16),
+			PSMZ16S: new PSMEntry([4, 8], [16, 2], [d], [16], PageSwizzles.PSMZ16S, ColumnSwizzles.PSMCT16),
+			PSMT8: new PSMEntry([8, 4], [16, 4], [p], [8], PageSwizzles.PSMCT32, ColumnSwizzles.PSMT8),
+			PSMT4: new PSMEntry([4, 8], [32, 4], [p], [4], PageSwizzles.PSMCT16, ColumnSwizzles.PSMT4),
+		};
+
+		/**
+		 * @param {Element} element
+		 * @param {Node[]} nodes
+		 */
+		function updateChildren(element, nodes) {
+			element.innerHTML = [];
+			element.append(...nodes);
+		}
+
+		/**
+		 * @typedef {Object} CreateNodeOptions
+		 * @property {string} [class]
+		 * @property {(string | null)[]} [classes]
+		 * @property {Object.<string, string>} [styles]
+		 * @property {string} [id]
+		 * @property {Node | string} [child]
+		 * @property {(Node | string | null)[]} [children]
+		 * @property {Object.<string, string>} [other] other attributes to add
+		 */
+
+		/**
+		 * Creates a new HTML node
+		 * @param {string} tag
+		 * @param {CreateNodeOptions} [options]
+		 * @returns {HTMLElement}
+		 */
+		function createNode(tag, options) {
+			let node = document.createElement(tag);
+			options = options || {};
+
+			let classes = options.classes || [];
+			if (options.class) { classes.push(options.class); }
+			classes.forEach(function(cls) { if (cls) { node.classList.add(cls); } });
+
+			let children = options.children || [];
+			if (options.child) { children.push(options.child); }
+			children.forEach(function(child) {
+				if (typeof child === "string") {
+					node.appendChild(document.createTextNode(child));
+				}
+				else if (child) {
+					node.appendChild(child);
+				}
+			});
+
+			if (options.id) {
+				node.id = options.id;
+			}
+
+			if (options.styles) {
+				for (let name in options.styles) {
+					if (!Object.hasOwnProperty.call(options.styles, name)) { continue; }
+					if (!options.styles[name]) { continue; }
+					node.style.setProperty(name, options.styles[name]);
+				}
+			}
+
+			let other = options.other || {};
+			for (let name in other) {
+				if (!Object.hasOwnProperty.call(other, name)) { continue; }
+				if (!other[name]) { continue; }
+				node.setAttribute(name, other[name]);
+			}
+
+			return node;
+		}
+
+		updateChildren(lSelect, Object.keys(PSM).map(x => createNode("option", {other: {value: x}, child: x})));
+		updateChildren(rSelect, Object.keys(PSM).map(x => createNode("option", {other: {value: x}, child: x})));
+
+		function refreshSizes() {
+			let lWidth = PSM[lSelect.value].width();
+			let rWidth = PSM[rSelect.value].width();
+			let width = lWidth + rWidth;
+			let height = Math.max(PSM[lSelect.value].height(), PSM[rSelect.value].height());
+			container.style.setProperty("grid-template-columns", `${100 * lWidth / width}% ${100 * rWidth / width}%`);
+			lDraw.style.setProperty("grid-template-columns", `repeat(${lWidth}, ${100/lWidth}%)`);
+			lDraw.style.setProperty("grid-template-rows", `repeat(${height}, ${100/height}%)`);
+			rDraw.style.setProperty("grid-template-columns", `repeat(${rWidth}, ${100/rWidth}%)`);
+			rDraw.style.setProperty("grid-template-rows", `repeat(${height}, ${100/height}%)`);
+		}
+
+		/**
+		 * @template T
+		 * @param {Bit[]} bits
+		 * @param {number} width
+		 * @param {number} height
+		 * @param {function(number, number): T} propertyGetter
+		 * @param {function(T, number): ?Element} nodeCreator
+		 * @returns {Element[]}
+		 */
+		function genRows(width, height, propertyGetter, nodeCreator) {
+			/** @type {T} */
+			let last;
+			let lastX = 0;
+			let out = [];
+			let x = 0;
+			let y = 0;
+			function flush() {
+				if (last === undefined) { return; }
+				let node = nodeCreator(last);
+				if (!node) { return; }
+				node.style.setProperty("grid-column-start", lastX + 1);
+				node.style.setProperty("grid-column-end", x + 1);
+				node.style.setProperty("grid-row", y + 1);
+				out.push(node);
+			}
+			for (y = 0; y < height; y++) {
+				for (x = 0; x < width; x++) {
+					let next = propertyGetter(x, y);
+					if (next !== last) {
+						flush();
+						last = next;
+						lastX = x;
+					}
+				}
+				flush();
+				last = undefined;
+			}
+			return out;
+		}
+
+		/**
+		 * @param {PSMEntry} psm
+		 * @param {Bit[]} bits
+		 */
+		function genNodes(psm, bits) {
+			let width = psm.width();
+			let height = psm.height();
+			let reference = psm.referenceBits();
+			let colors = genRows(width, height,
+				(x, y) => bits[psm.indexAt(x, y)].color,
+				color => color ? createNode("div", {styles: {"background-color": color}}) : null);
+			let ids = genRows(width, height,
+				(x, y) => bits[psm.indexAt(x, y)].color ? bits[psm.indexAt(x, y)].number : -1,
+				number => number !== -1 ? createNode("div", {class: "label", child: number.toString(16).toUpperCase()}) : null);
+			let pixels = genRows(width, height,
+				(x, y) => reference[psm.indexAt(x, y)].color ? reference[psm.indexAt(x, y)].number : -1,
+				number => number !== -1 ? createNode("div", {class: "pixel"}) : null);
+			return [].concat(colors, ids, pixels);
+		}
+
+		function refresh() {
+			refreshSizes();
+			let write = PSM[lSelect.value];
+			let read = PSM[rSelect.value];
+			let bits = Array(write.width() * write.height()).fill(0).map(_ => new Bit());
+			write.writeTo(bits);
+			updateChildren(lDraw, genNodes(write, bits));
+			updateChildren(rDraw, genNodes(read, bits));
+		}
+
+		refresh();
+	</script>
+</body>
+</html>

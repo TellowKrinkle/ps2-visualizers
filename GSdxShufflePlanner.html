@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>GSdx Shuffle Planner</title>
+</head>
+<body>
+	<textarea id="input" oninput="refresh()"></textarea>
+	<table id="SrcID"></table>
+	<table id="DstID"></table>
+	<p>
+		Type commands into the text box and see them executed below.  Src ID marks blocks with their starting position, Dst ID marks blocks with their ending position <br />
+		Supported commands:
+		<ul>
+			<li>load v0 v1 [v2 v3]: Load from memory.  Reorder the vectors to load out of order.  Specifying two vectors puts all following instructions in 256-bit (AVX2) mode, four selects 128-bit (SSE) mode</li>
+			<li>sw8, sw16, sw32, sw64, sw128: Corresponds to GSVector functions of the same name.  Specify two (256-bit) or four (128-bit) vectors, same as you would the GSVector functions</li>
+			<li>pblendd v0 v1 [v2 v3] 0xaa: Execute a pblendd from v0 to v1 and the inverse, swapping words between v0 and v1</li>
+			<li>pblendw v0 v1 [v2 v3] 0xaa: Like pblendd but with pblendw</li>
+			<li>pshufb v0 [v1 v2 v3] 0 1 3 2 etc: Execute a pshufb on the given vectors (0x80 not supported).  The mask list is looped, so you can specify 16 values with 256-bit vectors and it'll do the same mask to both lanes</li>
+			<li>vpermq v0 [v1] xyzw|0xe4: Execute a vpermq on the given vectors (only supported in AVX2 mode)</li>
+			<li>pshufd v0 [v1 v2 v3] xyzw|0xe4: Execute a pshufd on the given vectors</li>
+			<li>pshuf[lh]w v0 [v1 v2 v3] xyzw|0xe4: Execute a pshuflw / pshufhw on the given vectors</li>
+			<li>shufps v0 v1 [v1 v0] xxyy|0x50 [zzww|0xfa]: For each vector-length section in memory, execute a shufps on the n*2 and n*2+1 input vector, using the nth input imm value.  Both wrap around so you don't need to specify things extra times if it's the same each time</li>
+			<li>store v0 v1 [v2 v3]: Store to memory.  Use if you plan to store out of order</li>
+			<li>inv: Switch vector with the indices of each element.  Use if you want to work backwards instead of forwards (work with Dst IDs instead of Src IDs)</li>
+		</ul>
+	</p>
+	<p>
+		<label for="examplelist">Load an example: </label><select id="examplelist"></select>
+		<button onclick="loadExample(document.getElementById('examplelist').value)">Load</button>
+	</p>
+	<style>
+		td.v0 {
+			background-color: #FDA190;
+		}
+		td.v1 {
+			background-color: #FDD699;
+		}
+		td.v2 {
+			background-color: #B8E598;
+		}
+		td.v3 {
+			background-color: #A5F0EB;
+		}
+		td {
+			width: 1.5em;
+			height: 1.5em;
+			vertical-align: middle;
+			text-align: center;
+		}
+		th {
+			min-width: 10em;
+		}
+		#input {
+			min-height: 10em;
+			width: 40em;
+		}
+	</style>
+	<script>
+		function store(vsize, vectors, ints, arr) {
+			let out = [...arr];
+			for (let i = 0; i < vectors.length; i++) {
+				let wbase = i * vsize;
+				let rbase = vectors[i] * vsize;
+				for (let j = 0; j < vsize; j++) {
+					out[wbase + j] = arr[rbase + j];
+				}
+			}
+			return out;
+		}
+
+		function makeSwizzle(size) {
+			return function(vsize, vectors, ints, arr) {
+				if (vsize * vectors.length !== 64) { throw "Unsupported"; }
+				let out = [];
+				for (let i = 0; i < 64; i++) {
+					let a, b;
+					let low = i < 32;
+					let tmp = i % 32;
+					let low2 = tmp < 16;
+					if (vsize == 16) {	
+						a = low2 ? vectors[0] : vectors[2];
+						b = low2 ? vectors[1] : vectors[3];
+					} else {
+						a = vectors[0] * 2 + (low2 ? 0 : 1);
+						b = vectors[1] * 2 + (low2 ? 0 : 1);
+					}
+					let sidx = ((i%16)/size|0);
+					let src = sidx & 1 ? b : a;
+					out.push(arr[src*16 + (low ? 0 : 8) + size*(sidx>>1) + (i % size)]);
+				}
+				return store(vsize, vectors, ints, out);
+			};
+		}
+
+		function sw128(vsize, vectors, ints, arr) {
+			if (vsize !== 32) { throw "Unsupported"; }
+			let out = [];
+			for (let part of [0, 2, 1, 3]) {
+				let src = vectors[part>>1] * 32 + (part & 1 ? 16 : 0);
+				for (let i = 0; i < 16; i++) {
+					out.push(arr[src + i]);
+				}
+			}
+			return out;
+		}
+
+		/**
+		 * @param {function(Number[], Number, Number[]): Number} f In-lane transform
+		 */
+		function makeInLane(f) {
+			return function(vsize, vectors, ints, arr) {
+				let out = [...arr];
+				for (const vector of vectors) {
+					for (let i = 0; i < (vsize/16|0); i++) {
+						let base = vector * vsize + i * 16;
+						let section = arr.slice(base, base+16);
+						for (let j = 0; j < 16; j++) {
+							out[base+j] = f(ints, j, section);
+						}
+					}
+				}
+				return out;
+			};
+		}
+
+		/**
+		 * @param {function(Number[], Number, Number[]): Number} f Per-vector transform
+		 */
+		function makePerVector(f) {
+			return function(vsize, vectors, ints, arr) {
+				let out = [...arr];
+				for (const vector of vectors) {
+					let base = vector * vsize;
+					let section = arr.slice(base, base+vsize);
+					for (let j = 0; j < vsize; j++) {
+						out[base+j] = f(ints, j, section);
+					}
+				}
+				return out;
+			};
+		}
+
+		function makeShuf(shift) {
+			return function(ints, idx, arr) {
+				let section = idx>>shift;
+				let newSection = (ints[0] >> (section*2)) & 3;
+				return arr[(newSection<<shift) + (idx - (section<<shift))];
+			};
+		}
+
+		function shufps(vsize, vectors, ints, arr) {
+			let out = [];
+			for (let i = 0; i < (64/vsize|0); i++) {
+				let base1 = vectors[i*2 % vectors.length] * vsize;
+				let base2 = vectors[(i*2+1) % vectors.length] * vsize;
+				let mask = ints[i % ints.length];
+				for (let j = 0; j < vsize; j++) {
+					let src = j & 8 ? base2 : base1;
+					let section = (j >> 2) & 3;
+					let newSection = (mask >> (section*2)) & 3;
+					let idx = j - (section << 2) + (newSection << 2);
+					out.push(arr[src + idx]);
+				}
+			}
+			return out;
+		}
+
+		function makeBlend(shift) {
+			return function(vsize, vectors, ints, arr) {
+				let out = [...arr];
+				for (let i = 0; i < vectors.length; i += 2) {
+					let base1 = vectors[i] * vsize;
+					let base2 = vectors[i+1] * vsize;
+					for (let j = 0; j < vsize; j++) {
+						let idx = j >> shift;
+						let swap = (ints[0] >> (idx & 7)) & 1;
+						if (swap) {
+							let tmp = out[base1 + j];
+							out[base1 + j] = out[base2 + j];
+							out[base2 + j] = tmp;
+						}
+					}
+				}
+				return out;
+			}
+		}
+
+		function inv(arr) {
+			let out = [];
+			for (let i = 0; i < arr.length; i++) {
+				out.push(arr.indexOf(i));
+			}
+			return out;
+		}
+
+		/** @type {Object.<string, function(Number, Number[], Number[], Number[]): Number[]>} */
+		const OPS = {
+			"sw8": makeSwizzle(1),
+			"sw16": makeSwizzle(2),
+			"sw32": makeSwizzle(4),
+			"sw64": makeSwizzle(8),
+			"sw128": sw128,
+			"pblendw": makeBlend(1),
+			"pblendd": makeBlend(2),
+			"pshufb": makePerVector(function(ints, idx, arr) {
+				let newIDX = ints[idx % ints.length];
+				if (newIDX >= 16) { throw "bad pshufb index"; }
+				return arr[newIDX + (idx/16|0)*16];
+			}),
+			"vpermq": makePerVector(makeShuf(3)),
+			"pshufd": makeInLane(makeShuf(2)),
+			"pshuflw": makeInLane(function(ints, idx, arr) {
+				return idx < 8 ? makeShuf(1)(ints, idx, arr) : arr[idx];
+			}),
+			"pshufhw": makeInLane(function(ints, idx, arr) {
+				return idx < 8 ? arr[idx] : makeShuf(1)(ints, idx - 8, arr.slice(8));
+			}),
+			"shufps": shufps,
+			"load": function(vsize, vectors, ints, arr) {
+				let out = [];
+				for (const vector of vectors) {
+					let base = vector*vsize;
+					for (let i = 0; i < vsize; i++) {
+						out.push(arr[base+i]);
+					}
+				}
+				return out;
+			},
+			"store": store,
+			"inv": function(vsize, vectors, ints, arr) {
+				return inv(arr);
+			}
+		};
+
+		class Executor {
+			constructor() {
+				this.vsize = 16;
+			}
+
+			/**
+			 * @param {string} str String to parse
+			 * @param {Number[]} arr Input vector
+			 */
+			execute(str, arr) {
+				let args = str.split(/[^0-9a-zA-Z]+/);
+				let vectors = [];
+				let ints = [];
+				let op = "";
+				let desc = "";
+				const go = () => {
+					if (op.length === 0) { return; }
+					if (op === "load") {
+						this.vsize = vectors.length === 2 ? 32 : 16;
+					}
+					if (desc.length !== 0) { desc += " "; }
+					desc += op;
+					for (const vector of vectors) {
+						desc += " v" + vector;
+					}
+					arr = OPS[op](this.vsize, vectors, ints, arr);
+					op = "";
+					vectors = [];
+					ints = [];
+				}
+				for (const arg of args) {
+					if (/^v\d+$/.test(arg)) {
+						vectors.push(Number(arg.slice(1)));
+					} else if (/^\d+$/.test(arg)) {
+						ints.push(Number(arg));
+					} else if (/^0x[A-fa-f0-9]+$/.test(arg)) {
+						ints.push(parseInt(arg.slice(2), 16));
+					} else if (/^[xyzw]{4}$/.test(arg)) {
+						let n = 0;
+						for (let i = 0; i < 4; i++) {
+							n += ({x: 0, y: 1, z: 2, w: 3}[arg.charAt(i)] << (i*2));
+						}
+						ints.push(n);
+					} else {
+						go();
+						op = arg.toLowerCase();
+					}
+				}
+				go();
+				return {desc: desc, arr: arr};
+			}
+		}
+
+		function destIDs(str) {
+			let e = new Executor();
+			if (str === "") { return [...Array(64).keys()]; }
+			let results = e.execute(str, [...Array(64).keys()]).arr;
+			return inv(results);
+		}
+
+		/**
+		 * @typedef {Object} CreateNodeOptions
+		 * @property {string} [class]
+		 * @property {(string | null)[]} [classes]
+		 * @property {Object.<string, string>} [styles]
+		 * @property {string} [id]
+		 * @property {Node | string} [child]
+		 * @property {(Node | string | null)[]} [children]
+		 * @property {Object.<string, string>} [other] other attributes to add
+		 */
+
+		/**
+		 * Creates a new HTML node
+		 * @param {string} tag
+		 * @param {CreateNodeOptions} [options]
+		 * @returns {HTMLElement}
+		 */
+		function createNode(tag, options) {
+			let node = document.createElement(tag);
+			options = options || {};
+
+			let classes = options.classes || [];
+			if (options.class) { classes.push(options.class); }
+			classes.forEach(function(cls) { if (cls) { node.classList.add(cls); } });
+
+			let children = options.children || [];
+			if (options.child) { children.push(options.child); }
+			children.forEach(function(child) {
+				if (typeof child === "string") {
+					node.appendChild(document.createTextNode(child));
+				}
+				else if (child) {
+					node.appendChild(child);
+				}
+			});
+
+			if (options.id) {
+				node.id = options.id;
+			}
+
+			if (options.styles) {
+				for (let name in options.styles) {
+					if (!Object.hasOwnProperty.call(options.styles, name)) { continue; }
+					if (!options.styles[name]) { continue; }
+					node.style.setProperty(name, options.styles[name]);
+				}
+			}
+
+			let other = options.other || {};
+			for (let name in other) {
+				if (!Object.hasOwnProperty.call(other, name)) { continue; }
+				if (!other[name]) { continue; }
+				node.setAttribute(name, other[name]);
+			}
+
+			return node;
+		}
+
+		function makeRow(head, arr) {
+			let row = createNode("tr", {child: createNode("th", {child: head})});
+			for (const item of arr) {
+				let el = document.createElement("td");
+				el.appendChild(document.createTextNode(item));
+				el.classList.add("v" + (item>>4));
+				row.appendChild(el);
+			}
+			return row;
+		}
+
+		function makeTable(title, str, arr) {
+			let e = new Executor();
+			let head = createNode("th", {child: title, other: {colspan: arr.length + 1}});
+			let table = createNode("table", {child: createNode("thead", {child: createNode("tr", {child: head})})});
+			let body = createNode("tbody");
+			for (const line of str.split("\n")) {
+				if (line === "") { continue; }
+				let res = e.execute(line, arr);
+				body.appendChild(makeRow(res.desc, res.arr));
+				arr = res.arr;
+			}
+			table.appendChild(body);
+			return table;
+		}
+
+		function refresh() {
+			let input = document.getElementById("input").value;
+			try {
+				let srcID = makeTable("Src ID", input, [...Array(64).keys()]);
+				let dstID = makeTable("Dst ID", input, destIDs(input));
+				document.getElementById("SrcID").innerHTML = srcID.innerHTML;
+				document.getElementById("DstID").innerHTML = dstID.innerHTML;
+			} catch {}
+		}
+
+		refresh();
+
+		const EXAMPLES = {
+			"SSE2 ReadColumn16":
+				"load v0 v1 v2 v3\n" +
+				"sw16 v0 v1 v2 v3\n" +
+				"sw32 v0 v1 v2 v3\n" +
+				"sw16 v0 v2 v1 v3\n",
+			"SSE3 ReadColumn16": 
+				"load v0 v1 v2 v3\n" +
+				"pshufb v0 v1 v2 v3 0 1 4 5 8 9 12 13 2 3 6 7 10 11 14 15\n" +
+				"sw32 v0 v1 v2 v3\n" +
+				"sw64 v0 v1 v2 v3",
+			"AVX2 ReadColumn16":
+				"load v0 v1\n" +
+				"pshufb v0 v1 0 1 4 5 8 9 12 13 2 3 6 7 10 11 14 15\n" +
+				"vpermq v0 v1 xzyw\n" +
+				"shufps v0 v1 xzxz ywyw\n"
+		};
+
+		for (const key of Object.keys(EXAMPLES)) {
+			let node = createNode("option", {child: key, other: {value: key}});
+			document.getElementById("examplelist").appendChild(node);
+		}
+
+		function loadExample(name) {
+			if (EXAMPLES[name]) {
+				document.getElementById("input").value = EXAMPLES[name];
+				refresh();
+			}
+		}
+	</script>
+</body>
+</html>
