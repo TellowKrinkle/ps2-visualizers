@@ -124,6 +124,13 @@
 				}
 			}
 
+			pxCoord(pxNo) {
+				let width = this.width() / this.bitsPerPixel | 0;
+				let x = pxNo % width;
+				let y = pxNo / width | 0;
+				return [x, y];
+			}
+
 			/**
 			 * @param {number} x
 			 * @param {number} y
@@ -146,9 +153,7 @@
 			 * @param {function(number, string, number): void} fn function taking (bitOff, color, pxNo)
 			 */
 			loopBitOffsForPx(pxNo, fn) {
-				let width = this.width() / this.bitsPerPixel | 0;
-				let x = pxNo % width;
-				let y = pxNo / width | 0;
+				let [x, y] = this.pxCoord(pxNo);
 				this.loopBitOffsForPos(x, y, fn);
 			}
 
@@ -547,7 +552,9 @@
 			function makePixelNode(number) {
 				return createNode("div", {class: "pixel", other: {
 					onmouseover: `highlight("${psmName}", ${number});`,
-					onmouseout: `unhighlight("${psmName}", ${number});`
+					onmouseout: `unhighlight("${psmName}", ${number});`,
+					onmousedown: `dragBegin("${psmName}", ${number});`,
+					onmouseup: `dragEnd("${psmName}", ${number});`
 				}});
 			}
 			let pixels = genRows(width, height,
@@ -566,38 +573,80 @@
 			rGrid.replaceAll(genNodes(rSelect.value, bits));
 		}
 
-		let highlightBits = Array(PSM.PSMCT32.width() * PSM.PSMCT32.height()).fill(0).map(_ => false);
+		/** @type {"mouseover" | "dragging" | "dragged"} */
+		let highlightMode = "mouseover";
+		/** @type {{graph: string, px: number}} */
+		let highlightBegin = null;
+		/** @type {{graph: string, px: number}} */
+		let highlightEnd = null;
 
 		/**
 		 * @param {GridManager} grid
 		 * @param {PSMEntry} psm
 		 */
-		function drawHighlightFor(grid, psm) {
+		function drawHighlightFor(grid, psm, bits) {
 			let highlight = genRows(psm.width(), psm.height(),
-				(x, y) => highlightBits[psm.indexAt(x, y)],
+				(x, y) => bits[psm.indexAt(x, y)],
 				color => color ? createNode("div", {class: "highlight"}) : null);
 			grid.set("highlight", highlight);
 		}
 
 		function drawHighlight() {
-			drawHighlightFor(lGrid, PSM[lSelect.value]);
-			drawHighlightFor(rGrid, PSM[rSelect.value]);
+			if (highlightBegin === null) {
+				lGrid.set("highlight", []);
+				rGrid.set("highlight", []);
+				return;
+			}
+			let drawPSM = PSM[highlightBegin.graph];
+			let bits = Array(drawPSM.width() * drawPSM.height()).fill(false);
+			let [x1, y1] = drawPSM.pxCoord(highlightBegin.px);
+			let [x2, y2] = drawPSM.pxCoord(highlightEnd.px);
+			[x1, x2] = [Math.min(x1, x2), Math.max(x1, x2)];
+			[y1, y2] = [Math.min(y1, y2), Math.max(y1, y2)];
+			for (let y = y1; y <= y2; y++) {
+				for (let x = x1; x <= x2; x++) {
+					drawPSM.loopBitOffsForPos(x, y, function(bitOff, color) {
+						if (color) {
+							bits[bitOff] = true;
+						}
+					});
+				}
+			}
+			drawHighlightFor(lGrid, PSM[lSelect.value], bits);
+			drawHighlightFor(rGrid, PSM[rSelect.value], bits);
+		}
+
+		function dragBegin(select, pxNo) {
+			highlightMode = "dragging";
+			highlightEnd = highlightBegin = {graph: select, px: pxNo};
+		}
+
+		function dragEnd(select, pxNo) {
+			if (highlightBegin.px === highlightEnd.px) {
+				highlightMode = "mouseover";
+				drawHighlight();
+			} else {
+				highlightMode = "dragged";
+			}
 		}
 
 		function unhighlight(select, pxNo) {
-			PSM[select].loopBitOffsForPx(pxNo, function(bitOff) {
-				highlightBits[bitOff] = false;
-			});
-			drawHighlight();
+			if (highlightMode === "mouseover") {
+				highlightEnd = highlightBegin = null;
+				drawHighlight();
+			}
 		}
 
 		function highlight(select, pxNo) {
-			PSM[select].loopBitOffsForPx(pxNo, function(bitOff, color) {
-				if (color) {
-					highlightBits[bitOff] = true;
+			if (highlightMode === "mouseover") {
+				highlightEnd = highlightBegin = {graph: select, px: pxNo};
+				drawHighlight();
+			} else if (highlightMode === "dragging") {
+				if (select === highlightBegin.graph) {
+					highlightEnd = {graph: select, px: pxNo};
+					drawHighlight();
 				}
-			});
-			drawHighlight();
+			}
 		}
 
 		refresh();
