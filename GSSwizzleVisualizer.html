@@ -248,6 +248,73 @@
 			PSMT4: new PSMEntry([4, 8], [32, 4], [p], [4], PageSwizzles.PSMCT16, ColumnSwizzles.PSMT4),
 		};
 
+		/// Tracks elements in a CSS grid allowing replacement of groups at a time
+		class GridManager {
+			/**
+			 * Constructs a GridManager
+			 * @param {HTMLElement} grid The element with the `display: grid` property
+			 * @param {string[]} order The order to place element groups
+			 */
+			constructor(grid, order) {
+				this.grid = grid;
+				this.order = order;
+				/** @type {Object.<string, HTMLElement[]>} */
+				this.groups = {};
+				for (const group of this.order) {
+					this.groups[group] = [];
+				}
+			}
+
+			clear() {
+				this.grid.innerHTML = "";
+				for (const group of this.order) {
+					this.groups[group] = [];
+				}
+			}
+
+			/**
+			 * Replaces all elements with `groups`
+			 * @param {Object.<string, HTMLElement[]>} groups
+			 */
+			replaceAll(groups) {
+				this.grid.innerHTML = "";
+				for (const group of this.order) {
+					let newGrp = groups[group] || [];
+					this.groups[group] = newGrp;
+					this.grid.append(...newGrp);
+				}
+			}
+
+			/**
+			 * Replace the elements in `group`
+			 * @param {string} group
+			 * @param {HTMLElement[]} elems
+			 */
+			set(group, elems) {
+				let gidx = this.order.indexOf(group);
+				if (gidx < 0) { throw `Bad group: ${group}`; }
+				for (const item of this.groups[group]) {
+					this.grid.removeChild(item);
+				}
+				let next = null;
+				for (let i = gidx + 1; i < this.order.length; i++) {
+					let grp = this.groups[this.order[i]];
+					if (grp.length > 0) {
+						next = grp[0];
+						break;
+					}
+				}
+				if (next !== null) {
+					for (const item of elems) {
+						this.grid.insertBefore(item, next);
+					}
+				} else {
+					this.grid.append(...elems);
+				}
+				this.groups[group] = elems;
+			}
+		}
+
 		/**
 		 * @param {Element} element
 		 * @param {Node[]} nodes
@@ -314,6 +381,10 @@
 
 			return node;
 		}
+
+		let order = ["color", "id", "pixel", "highlight"];
+		let lGrid = new GridManager(lDraw, order);
+		let rGrid = new GridManager(rDraw, order);
 
 		updateChildren(lSelect, Object.keys(PSM).map(x => createNode("option", {other: {value: x}, child: x})));
 		updateChildren(rSelect, Object.keys(PSM).map(x => createNode("option", {other: {value: x}, child: x})));
@@ -436,7 +507,7 @@
 			let pixels = genRows(width, height,
 				(x, y) => reference[psm.indexAt(x, y)].color ? reference[psm.indexAt(x, y)].number : -1,
 				number => number !== -1 ? createNode("div", {class: "pixel"}) : null);
-			return [].concat(colors, ids, pixels);
+			return {color: colors, id: ids, pixel: pixels};
 		}
 
 		function refresh() {
@@ -445,8 +516,8 @@
 			let read = PSM[rSelect.value];
 			let bits = Array(write.width() * write.height()).fill(0).map(_ => new Bit());
 			write.writeTo(bits);
-			updateChildren(lDraw, genNodes(write, bits));
-			updateChildren(rDraw, genNodes(read, bits));
+			lGrid.replaceAll(genNodes(write, bits));
+			rGrid.replaceAll(genNodes(read, bits));
 		}
 
 		refresh();
