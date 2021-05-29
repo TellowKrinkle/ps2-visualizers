@@ -6,9 +6,13 @@
 		.label {
 			text-align: center;
 			font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace;
+			pointer-events: none;
 		}
 		.pixel {
 			border: 1px solid black;
+		}
+		.highlight {
+			background-color: rgba(1, 1, 1, 0.5);
 		}
 	</style>
 </head>
@@ -102,8 +106,8 @@
 				}
 			}
 
-			/** @param {Bit[]} bits */
-			writeTo(bits) {
+			/** @param {function(number, string, number): void} fn function taking (bitOff, color, pxNo) */
+			loopBitOffs(fn) {
 				let width = this.width() / this.bitsPerPixel | 0;
 				let height = this.height();
 				for (let i = 0; i < height; i++) {
@@ -112,13 +116,48 @@
 						let x = j * this.bitsPerPixel;
 						for (let k = 0; k < this.partsInPixel.length; k++) {
 							for (let l = 0; l < this.bitsPerPart[k]; l++) {
-								bits[this.indexAt(x, i)].color = this.partsInPixel[k];
-								bits[this.indexAt(x, i)].number = no;
+								fn(this.indexAt(x, i), this.partsInPixel[k], no);
 								x++;
 							}
 						}
 					}
 				}
+			}
+
+			/**
+			 * @param {number} x
+			 * @param {number} y
+			 * @param {function(number, string, number): void} fn function taking (bitOff, color, pxNo)
+			 */
+			loopBitOffsForPos(x, y, fn) {
+				let width = this.width() / this.bitsPerPixel | 0;
+				let no = y * width + x;
+				x *= this.bitsPerPixel;
+				for (let k = 0; k < this.partsInPixel.length; k++) {
+					for (let l = 0; l < this.bitsPerPart[k]; l++) {
+						fn(this.indexAt(x, y), this.partsInPixel[k], no);
+						x++;
+					}
+				}
+			}
+
+			/**
+			 * @param {number} pxNo pixel number
+			 * @param {function(number, string, number): void} fn function taking (bitOff, color, pxNo)
+			 */
+			loopBitOffsForPx(pxNo, fn) {
+				let width = this.width() / this.bitsPerPixel | 0;
+				let x = pxNo % width;
+				let y = pxNo / width | 0;
+				this.loopBitOffsForPos(x, y, fn);
+			}
+
+			/** @param {Bit[]} bits */
+			writeTo(bits) {
+				this.loopBitOffs(function(bitOff, color, pxNo) {
+					bits[bitOff].color = color;
+					bits[bitOff].number = pxNo;
+				});
 			}
 
 			referenceBits() {
@@ -382,7 +421,7 @@
 			return node;
 		}
 
-		let order = ["color", "id", "pixel", "highlight"];
+		let order = ["color", "id", "highlight", "pixel"];
 		let lGrid = new GridManager(lDraw, order);
 		let rGrid = new GridManager(rDraw, order);
 
@@ -491,10 +530,11 @@
 		}
 
 		/**
-		 * @param {PSMEntry} psm
+		 * @param {string} psmName
 		 * @param {Bit[]} bits
 		 */
-		function genNodes(psm, bits) {
+		function genNodes(psmName, bits) {
+			let psm = PSM[psmName];
 			let width = psm.width();
 			let height = psm.height();
 			let reference = psm.referenceBits();
@@ -504,9 +544,15 @@
 			let ids = genRows(width, height,
 				(x, y) => bits[psm.indexAt(x, y)].color ? bits[psm.indexAt(x, y)].number : -1,
 				number => number !== -1 ? createNode("div", {class: "label", child: number.toString(16).toUpperCase()}) : null);
+			function makePixelNode(number) {
+				return createNode("div", {class: "pixel", other: {
+					onmouseover: `highlight("${psmName}", ${number});`,
+					onmouseout: `unhighlight("${psmName}", ${number});`
+				}});
+			}
 			let pixels = genRows(width, height,
 				(x, y) => reference[psm.indexAt(x, y)].color ? reference[psm.indexAt(x, y)].number : -1,
-				number => number !== -1 ? createNode("div", {class: "pixel"}) : null);
+				number => number !== -1 ? makePixelNode(number) : null);
 			return {color: colors, id: ids, pixel: pixels};
 		}
 
@@ -516,8 +562,42 @@
 			let read = PSM[rSelect.value];
 			let bits = Array(write.width() * write.height()).fill(0).map(_ => new Bit());
 			write.writeTo(bits);
-			lGrid.replaceAll(genNodes(write, bits));
-			rGrid.replaceAll(genNodes(read, bits));
+			lGrid.replaceAll(genNodes(lSelect.value, bits));
+			rGrid.replaceAll(genNodes(rSelect.value, bits));
+		}
+
+		let highlightBits = Array(PSM.PSMCT32.width() * PSM.PSMCT32.height()).fill(0).map(_ => false);
+
+		/**
+		 * @param {GridManager} grid
+		 * @param {PSMEntry} psm
+		 */
+		function drawHighlightFor(grid, psm) {
+			let highlight = genRows(psm.width(), psm.height(),
+				(x, y) => highlightBits[psm.indexAt(x, y)],
+				color => color ? createNode("div", {class: "highlight"}) : null);
+			grid.set("highlight", highlight);
+		}
+
+		function drawHighlight() {
+			drawHighlightFor(lGrid, PSM[lSelect.value]);
+			drawHighlightFor(rGrid, PSM[rSelect.value]);
+		}
+
+		function unhighlight(select, pxNo) {
+			PSM[select].loopBitOffsForPx(pxNo, function(bitOff) {
+				highlightBits[bitOff] = false;
+			});
+			drawHighlight();
+		}
+
+		function highlight(select, pxNo) {
+			PSM[select].loopBitOffsForPx(pxNo, function(bitOff, color) {
+				if (color) {
+					highlightBits[bitOff] = true;
+				}
+			});
+			drawHighlight();
 		}
 
 		refresh();
