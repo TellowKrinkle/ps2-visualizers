@@ -571,6 +571,7 @@
 			write.writeTo(bits);
 			lGrid.replaceAll(genNodes(lSelect.value, bits));
 			rGrid.replaceAll(genNodes(rSelect.value, bits));
+			drawHighlight();
 		}
 
 		/** @type {"mouseover" | "dragging" | "dragged"} */
