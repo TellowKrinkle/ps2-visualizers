@@ -9,7 +9,7 @@
 			pointer-events: none;
 		}
 		.pixel {
-			border: 1px solid black;
+			border: 0.5px solid black;
 		}
 		.highlight {
 			background-color: rgba(1, 1, 1, 0.5);
@@ -38,7 +38,7 @@
 		const BITS_PER_PAGE = 65536;
 		const BITS_PER_BLOCK = BITS_PER_PAGE / 32;
 		const BITS_PER_COLUMN = BITS_PER_BLOCK / 4;
-		let SHOWING_WHOLE_PAGE = false;
+		let SHOWING_WHOLE_PAGE = new URLSearchParams(window.location.search).get("fullpage") ? true : false;
 
 		class PSMEntry {
 			/**
@@ -541,7 +541,7 @@
 			let colors = genRows(width, height,
 				(x, y) => bits[psm.indexAt(x, y)].color,
 				color => color ? createNode("div", {styles: {"background-color": color}}) : null);
-			let ids = genRows(width, height,
+			let ids = SHOWING_WHOLE_PAGE ? [] : genRows(width, height,
 				(x, y) => bits[psm.indexAt(x, y)].color ? bits[psm.indexAt(x, y)].number : -1,
 				number => number !== -1 ? createNode("div", {class: "label", child: number.toString(16).toUpperCase()}) : null);
 			function makePixelNode(number) {
